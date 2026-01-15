@@ -1,0 +1,306 @@
+const { Client, LocalAuth } = require('whatsapp-web.js');
+const qrcode = require('qrcode-terminal');
+const TelegramBot = require('node-telegram-bot-api');
+const express = require('express');
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+// ========== CONFIGURACIÓN ==========
+// 1. Token de tu bot de Telegram
+const TELEGRAM_TOKEN = '8125896319:AAHZ3I11A_YOfALy0HjUXbpIfBPJMsholJc';
+// 2. Tu ID personal de Telegram (de @userinfobot)
+const TU_CHAT_ID = 'TU_ID_PERSONAL_AQUI'; // CAMBIA ESTO
+// ===================================
+
+console.log('🚀 Iniciando bot WhatsApp-Telegram...');
+
+// Bot de Telegram
+const telegramBot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
+console.log('✅ Bot de Telegram configurado');
+
+// Configuración para Heroku
+const whatsappClient = new Client({
+  authStrategy: new LocalAuth({
+    dataPath: '/tmp/.wwebjs_auth'
+  }),
+  puppeteer: {
+    headless: true,
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-accelerated-2d-canvas',
+      '--no-first-run',
+      '--no-zygote',
+      '--single-process',
+      '--disable-gpu'
+    ]
+  }
+});
+
+// Almacena: { referencia: chatId }
+const pedidosActivos = new Map();
+
+// ========== EVENTOS WHATSAPP ==========
+whatsappClient.on('qr', qr => {
+  console.log('📱 ESCANEA ESTE QR CON WHATSAPP:');
+  qrcode.generate(qr, { small: true });
+  console.log('\n⚠️ Abre WhatsApp en tu teléfono');
+  console.log('⚠️ Menú → Dispositivos vinculados → Vincular dispositivo');
+  console.log('⚠️ Escanea el QR de arriba\n');
+});
+
+whatsappClient.on('ready', () => {
+  console.log('✅ WhatsApp CONECTADO correctamente!');
+  // Notificar a Telegram
+  telegramBot.sendMessage(TU_CHAT_ID, '🤖 Bot conectado a WhatsApp correctamente!');
+});
+
+whatsappClient.on('message', async message => {
+  const texto = message.body.trim();
+  const chatId = message.from;
+  
+  console.log(`📥 WhatsApp [${chatId}]: ${texto.substring(0, 50)}...`);
+
+  // ===== COMANDO /cmds =====
+  if (texto.toLowerCase() === '/cmds') {
+    const comandos = `
+🤖 *COMANDOS DISPONIBLES*
+
+/dnix [referencia] - Enviar pedido con referencia
+*Ejemplo:* /dnix 12345678
+
+⚠️ *La referencia debe tener exactamente 8 dígitos*
+    `;
+    
+    await message.reply(comandos);
+    console.log('ℹ️ Mostrado /cmds');
+    return;
+  }
+
+  // ===== COMANDO /dnix =====
+  if (texto.toLowerCase().startsWith('/dnix')) {
+    // Extraer la referencia
+    const partes = texto.split(' ');
+    if (partes.length < 2) {
+      await message.reply('❌ Formato incorrecto. Usa: /dnix 12345678');
+      return;
+    }
+    
+    const referencia = partes[1].trim();
+    
+    // Validar que sea 8 caracteres (pueden ser números o letras)
+    if (referencia.length !== 8) {
+      await message.reply('❌ La referencia debe tener exactamente 8 caracteres');
+      return;
+    }
+    
+    // Guardar referencia con su chat
+    pedidosActivos.set(referencia, {
+      chatId: chatId,
+      timestamp: Date.now(),
+      usuario: message.from
+    });
+    
+    // Confirmar en WhatsApp
+    await message.reply(`✅ Pedido recibido\n📋 Referencia: *${referencia}*\n⏳ Procesando...`);
+    
+    // Enviar a Telegram
+    const mensajeTelegram = `
+📲 *NUEVO PEDIDO DNIX*
+
+👤 *Usuario:* \`${message.from}\`
+🔢 *Referencia:* \`${referencia}\`
+📝 *Comando completo:* ${texto}
+
+🕐 *Hora:* ${new Date().toLocaleTimeString('es-ES')}
+📋 *Pedidos activos:* ${pedidosActivos.size}
+    `;
+    
+    try {
+      await telegramBot.sendMessage(TU_CHAT_ID, mensajeTelegram, { 
+        parse_mode: 'Markdown' 
+      });
+      console.log(`✅ Pedido ${referencia} enviado a Telegram`);
+    } catch (error) {
+      console.error('❌ Error enviando a Telegram:', error.message);
+    }
+    
+    // Limpiar pedidos antiguos (más de 24 horas)
+    const ahora = Date.now();
+    for (const [ref, data] of pedidosActivos.entries()) {
+      if (ahora - data.timestamp > 24 * 60 * 60 * 1000) {
+        pedidosActivos.delete(ref);
+      }
+    }
+    return;
+  }
+
+  // ===== OTROS COMANDOS / =====
+  if (texto.startsWith('/')) {
+    await message.reply('❌ Comando no reconocido. Usa /cmds para ver comandos disponibles');
+    return;
+  }
+});
+
+// ========== EVENTOS TELEGRAM ==========
+telegramBot.on('message', async (msg) => {
+  // Solo procesar mensajes del dueño
+  if (msg.chat.id.toString() !== TU_CHAT_ID.toString()) {
+    return;
+  }
+  
+  const textoTelegram = msg.text.trim();
+  console.log(`📤 Telegram: ${textoTelegram}`);
+  
+  // Formato de respuesta: referencia + mensaje
+  // Ejemplo: "12345678 El pedido está listo"
+  const partes = textoTelegram.split(' ');
+  
+  if (partes.length >= 2) {
+    const posibleReferencia = partes[0];
+    const mensajeRespuesta = partes.slice(1).join(' ');
+    
+    // Buscar si existe la referencia
+    if (pedidosActivos.has(posibleReferencia)) {
+      const pedido = pedidosActivos.get(posibleReferencia);
+      
+      try {
+        // Enviar respuesta a WhatsApp
+        await whatsappClient.sendMessage(
+          pedido.chatId, 
+          `📨 *Respuesta a referencia ${posibleReferencia}:*\n\n${mensajeRespuesta}`
+        );
+        
+        console.log(`✅ Respuesta enviada a WhatsApp para referencia ${posibleReferencia}`);
+        
+        // Confirmar en Telegram
+        await telegramBot.sendMessage(
+          TU_CHAT_ID,
+          `✅ Enviado a WhatsApp:\n\nReferencia: ${posibleReferencia}\nMensaje: ${mensajeRespuesta}\n\nUsuario: ${pedido.usuario}`
+        );
+        
+        // Opcional: eliminar referencia después de responder
+        // pedidosActivos.delete(posibleReferencia);
+        
+      } catch (error) {
+        console.error('❌ Error enviando a WhatsApp:', error.message);
+        await telegramBot.sendMessage(TU_CHAT_ID, '❌ Error enviando la respuesta');
+      }
+    } else {
+      // Si no es una referencia válida, enviar como mensaje normal
+      await telegramBot.sendMessage(
+        TU_CHAT_ID,
+        `❌ Referencia no encontrada: "${posibleReferencia}"\n\n📋 Pedidos activos:\n${Array.from(pedidosActivos.keys()).join(', ') || 'Ninguno'}`
+      );
+    }
+  } else {
+    // Si no tiene formato referencia+mensaje
+    await telegramBot.sendMessage(
+      TU_CHAT_ID,
+      '⚠️ Formato incorrecto. Usa:\n\n`[referencia] [mensaje]`\n\nEjemplo:\n`12345678 El pedido está listo para recoger`'
+    );
+  }
+});
+
+whatsappClient.on('disconnected', (reason) => {
+  console.log('❌ WhatsApp desconectado:', reason);
+  console.log('🔄 Reiniciando en 10 segundos...');
+  setTimeout(() => whatsappClient.initialize(), 10000);
+});
+
+// ========== PÁGINA WEB ==========
+app.get('/', (req, res) => {
+  const html = `
+  <!DOCTYPE html>
+  <html>
+  <head>
+    <title>🤖 Bot WhatsApp-Telegram DNIX</title>
+    <meta charset="utf-8">
+    <style>
+      body { font-family: Arial; padding: 40px; text-align: center; max-width: 800px; margin: 0 auto; }
+      .status { background: #4CAF50; color: white; padding: 15px; border-radius: 8px; margin: 20px 0; }
+      .comandos { background: #f0f0f0; padding: 20px; border-radius: 10px; text-align: left; margin: 20px 0; }
+      .qr { background: #e3f2fd; padding: 20px; border-radius: 10px; margin: 20px 0; }
+      .pedidos { background: #fff3e0; padding: 15px; border-radius: 8px; margin: 20px 0; }
+    </style>
+  </head>
+  <body>
+    <h1>🤖 Bot WhatsApp-Telegram DNIX</h1>
+    
+    <div class="status">
+      <h3>✅ Estado: Funcionando</h3>
+      <p>Pedidos activos: ${pedidosActivos.size}</p>
+    </div>
+    
+    <div class="comandos">
+      <h3>📋 Comandos en WhatsApp:</h3>
+      <p><strong>/cmds</strong> - Ver todos los comandos</p>
+      <p><strong>/dnix [referencia]</strong> - Enviar pedido</p>
+      <p><em>Ejemplo: /dnix ABC12345</em></p>
+    </div>
+    
+    <div class="qr">
+      <h3>📱 Conectar WhatsApp:</h3>
+      <p>1. Abre WhatsApp → Menú → Dispositivos vinculados</p>
+      <p>2. "Vincular dispositivo"</p>
+      <p>3. Escanea el QR de los logs de Heroku</p>
+    </div>
+    
+    <div class="pedidos">
+      <h3>📨 Cómo responder desde Telegram:</h3>
+      <p>Formato: <code>[referencia] [mensaje]</code></p>
+      <p><em>Ejemplo: <code>ABC12345 El pedido está listo</code></em></p>
+    </div>
+    
+    <p><strong>URL:</strong> ${req.protocol}://${req.get('host')}</p>
+    <p>👁️ Ver logs en Heroku para el QR</p>
+  </body>
+  </html>
+  `;
+  res.send(html);
+});
+
+// Health check
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'healthy',
+    whatsapp: 'connected',
+    telegram: 'connected',
+    pedidos_activos: pedidosActivos.size,
+    timestamp: new Date().toISOString()
+  });
+});
+
+// ========== INICIAR TODO ==========
+async function startBot() {
+  try {
+    console.log('🔧 Inicializando WhatsApp Web...');
+    await whatsappClient.initialize();
+    
+    app.listen(PORT, () => {
+      console.log(`🌐 Servidor web en puerto ${PORT}`);
+      console.log('✨ Bot DNIX listo para funcionar!');
+      console.log('========================================');
+      console.log('📋 COMANDOS DISPONIBLES:');
+      console.log('  WhatsApp: /cmds - Ver comandos');
+      console.log('  WhatsApp: /dnix [8 caracteres] - Enviar pedido');
+      console.log('  Telegram: [referencia] [mensaje] - Responder pedido');
+      console.log('========================================');
+    });
+    
+  } catch (error) {
+    console.error('❌ ERROR crítico:', error);
+    process.exit(1);
+  }
+}
+
+startBot();
+
+// Manejar cierre
+process.on('SIGINT', () => {
+  console.log('👋 Apagando bot...');
+  whatsappClient.destroy();
+  process.exit();
+});

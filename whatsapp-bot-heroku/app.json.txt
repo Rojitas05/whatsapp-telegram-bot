@@ -1,0 +1,15 @@
+{
+  "name": "WhatsApp-Telegram Bridge",
+  "description": "Puente entre WhatsApp y Telegram",
+  "repository": "https://github.com/tuusuario/whatsapp-bot",
+  "logo": "https://node-js-sample.herokuapp.com/node.png",
+  "keywords": ["node", "whatsapp", "telegram", "bot"],
+  "buildpacks": [
+    {
+      "url": "heroku/nodejs"
+    },
+    {
+      "url": "https://github.com/jontewks/puppeteer-heroku-buildpack"
+    }
+  ]
+}
